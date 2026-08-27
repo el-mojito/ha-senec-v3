@@ -12,6 +12,7 @@ import re
 import secrets
 import string
 import traceback
+from dataclasses import replace
 from base64 import urlsafe_b64encode
 from datetime import datetime, timezone, timedelta
 from json import JSONDecodeError
@@ -255,6 +256,10 @@ class SenecLocal:
         self._last_system_reset = 0
         self._timeout = aiohttp.ClientTimeout(total=20, connect=None, sock_connect=None, sock_read=None,
                                               ceil_threshold=5)
+
+        # an list for number entities, that must be patched, once we have set the
+        # 'self._bridge_to_senec_online' to something...
+        self._number_entities_to_patch_later = []
         self._bridge_to_senec_online = None
 
         #try:
@@ -264,18 +269,36 @@ class SenecLocal:
 
     def set_senec_online_instance(self, a_senec_online):
         if a_senec_online is not None:
-            _LOGGER.debug(f"SIBLING: SenecLocal: bound a instance of SenecOnline - BRIDGE from LOCAL to ONLINE is establish!")
+            _LOGGER.info(f"set_senec_online_instance(): SIBLING: SenecLocal: bound a instance of SenecOnline - BRIDGE from LOCAL to ONLINE is establish!")
             self._bridge_to_senec_online = a_senec_online
             if self._QUERY_WALLBOX_APPAPI:
                 self._bridge_to_senec_online._QUERY_WALLBOX = True
                 # ok let's force an UPDATE of the WEB-API
-                _LOGGER.debug("force refresh of wallbox-data via app-api…")
+                _LOGGER.info("set_senec_online_instance(): force refresh of wallbox-data via app-api…")
                 try:
                     asyncio.create_task(self._bridge_to_senec_online.update())
                 except Exception as exc:
-                    _LOGGER.debug(f"Exception while try to call 'self._bridge_to_senec_online.update': {exc}")
+                    _LOGGER.debug(f"set_senec_online_instance(): Exception while try to call 'self._bridge_to_senec_online.update': {exc}")
+
+            # ok after we have set the new SenecOnline Object (to our SenecLocal instance) we can/should patch the remaining
+            # min/max values...
+            try:
+                for a_obj in self._number_entities_to_patch_later:
+                    the_entrity = a_obj["entity"]
+                    min_max = getattr(self, a_obj["method"])
+                    if min_max is not None:
+                        _LOGGER.debug(f"set_senec_online_instance(): LOCAL: Going to adjust min/max values for '{the_entrity.entity_.key}' with min: {min_max[0]} and max: {min_max[1]}")
+                        the_entrity.entity_description = replace(
+                            the_entrity.entity_description,
+                            native_min_value=round(float(min_max[0]), 1),
+                            native_max_value=round(float(min_max[1]), 1)
+                        )
+                    else:
+                        _LOGGER.debug(f"set_senec_online_instance(): LOCAL: No min/max values found for '{the_entrity.entity_description.key}'")
+            except BaseException as exc:
+                _LOGGER.debug(f"set_senec_online_instance(): LOCAL: Error while adjusting min/max values: {type(exc).__name__} - {exc}")
         else:
-            _LOGGER.debug(f"SIBLING: SenecLocal: remove reference to SenecOnline - BRIDGE from LOCAL to ONLINE is destroyed!")
+            _LOGGER.info(f"set_senec_online_instance(): SIBLING: SenecLocal: remove reference to SenecOnline - BRIDGE from LOCAL to ONLINE is destroyed!")
             self._bridge_to_senec_online = None
 
     async def update(self):
@@ -2661,7 +2684,10 @@ class SenecLocal:
                                       SENEC_SECTION_WALLBOX, "MIN_CHARGING_CURRENT", "fl", value)
 
                 if sync and self._bridge_to_senec_online is not None:
-                    await self._bridge_to_senec_online.app_set_wallbox_icmax(value_to_set=value, wallbox_num=(pos + 1), sync=False)
+                    # DEACTIVATED SYNC CAUSE OF
+                    # https://github.com/marq24/ha-senec-v3/issues/234
+                    # await self._bridge_to_senec_online.app_set_wallbox_icmax(value_to_set=value, wallbox_num=(pos + 1), sync=False)
+                    _LOGGER.info(f"set_nva_wallbox_set_icmax(): SKIP OnlineSYNC for value: {value} - {(pos + 1)} DEACTIVATED SYNC CAUSE OF https://github.com/marq24/ha-senec-v3/issues/234")
             else:
                 _LOGGER.warning(f"No data for '{SENEC_SECTION_WALLBOX}': 'SET_ICMAX' and/or 'MIN_CHARGING_CURRENT' in self._raw!"
                                 f" -> {self._raw.keys()} -> {"NO 'SENEC_SECTION_WALLBOX' PRESENT" if SENEC_SECTION_WALLBOX not in self._raw else self._raw[SENEC_SECTION_WALLBOX].keys()}")
@@ -3570,14 +3596,14 @@ class SenecOnline:
 
     def set_senec_local_instance(self, a_senec_local):
         if a_senec_local is not None:
-            _LOGGER.debug(f"SIBLING: SenecOnline: bound a instance of SenecLocal - BRIDGE from ONLINE to LOCAL is establish!")
+            _LOGGER.info(f"set_senec_local_instance(): SIBLING: SenecOnline: bound a instance of SenecLocal - BRIDGE from ONLINE to LOCAL is establish!")
             self._bridge_to_senec_local = a_senec_local
             # ok local-polling (lala.cgi) is already existing…
             if self._bridge_to_senec_local._QUERY_WALLBOX_APPAPI:
                 self._QUERY_WALLBOX = True
-                _LOGGER.debug("APP-API: will query WALLBOX data (cause 'lala_cgi._QUERY_WALLBOX_APPAPI' is True)")
+                _LOGGER.info("set_senec_local_instance(): APP-API: will query WALLBOX data (cause 'lala_cgi._QUERY_WALLBOX_APPAPI' is True)")
         else:
-            _LOGGER.debug(f"SIBLING: SenecOnline: remove reference to SenecLocal - BRIDGE from ONLINE to LOCAL is destroyed!")
+            _LOGGER.info(f"set_senec_local_instance(): SIBLING: SenecOnline: remove reference to SenecLocal - BRIDGE from ONLINE to LOCAL is destroyed!")
             self._bridge_to_senec_local = None
 
     # async def _rename_token_file_if_needed(self, user:str):
@@ -6398,7 +6424,11 @@ class SenecOnline:
             if success:
                 # do we need to sync the value back to the 'lala_cgi' integration?
                 if sync and self._bridge_to_senec_local is not None:
-                    await self._bridge_to_senec_local.set_nva_wallbox_set_icmax(pos=idx, value=value_to_set, sync=False)
+                    # DEACTIVATED SYNC CAUSE OF
+                    # https://github.com/marq24/ha-senec-v3/issues/234
+                    # await self._bridge_to_senec_local.set_nva_wallbox_set_icmax(pos=idx, value=value_to_set, sync=False)
+                    _LOGGER.info(f"app_set_wallbox_icmax(): SKIP LocalSYNC for value: {value_to_set} - {idx} DEACTIVATED SYNC CAUSE OF https://github.com/marq24/ha-senec-v3/issues/234")
+                    pass
 
     def app_only_for_local_is_any_wallbox_in_fast_or_fastwithbattery_mode(self):
         # only when one of the WB's is in the FAST, FASTWITHBATTERY mode, we allow the switch of

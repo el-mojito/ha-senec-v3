@@ -11,6 +11,7 @@ from homeassistant.core import HomeAssistant, Event
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import entity_registry, config_validation as config_val, device_registry as device_reg
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.storage import STORAGE_DIR
 from homeassistant.helpers.typing import UNDEFINED
@@ -288,19 +289,8 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
         # we launch the check_for_migration_tasks worker...
         hass.async_create_task(coordinator.check_for_post_migration_tasks(hass))
 
-        # Search the (optional) sibling SenecLocal for this SenecOnline via serialnumber and connect them
-        for a_other_coord in hass.data[DOMAIN].values():
-          if isinstance(a_other_coord, SenecDataUpdateCoordinator) and isinstance(a_other_coord.senec, SenecLocal):
-            # we must ensure that the 'a_other_coord' have already passed it's initialization-phase...
-            max_wait_count = 0
-            while max_wait_count < 5 and a_other_coord._device_serial is None:
-                await asyncio.sleep(5)
-                max_wait_count += 1
-
-            if coordinator._device_serial == a_other_coord._device_serial:
-                _LOGGER.info(f"SIBLING: LOCAL Sibling found for this SenecOnline[{util.mask_string(coordinator._device_serial)}]: {a_other_coord.senec}")
-                coordinator.senec.set_senec_local_instance(a_other_coord.senec)
-                a_other_coord.senec.set_senec_online_instance(coordinator.senec)
+        # Search the (optional) sibling SenecLocal for this SenecOnline via serial-number and connect them
+        hass.async_create_task(coordinator.check_and_set_senec_online_at_senec_local(hass))
 
         # Register Services
         senec_services = SenecService.SenecService(hass, config_entry, coordinator)
@@ -377,6 +367,71 @@ async def check_device_registry(hass: HomeAssistant, config_entry_id:str = None)
                         a_device_reg.async_remove_device(device_id=a_device_entry_id)
 
         DEVICE_REG_CLEANUP_RUNNING = False
+
+
+async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry):
+    """Unload Senec config entry."""
+    _LOGGER.debug(f"async_unload_entry() called for entry: {config_entry.entry_id}")
+    unload_ok = await hass.config_entries.async_unload_platforms(config_entry, PLATFORMS)
+
+    if unload_ok:
+        if DOMAIN in hass.data and config_entry.entry_id in hass.data[DOMAIN]:
+            try:
+                the_unload_coordinator = hass.data[DOMAIN][config_entry.entry_id]
+
+                # we must find all other (still present) coordinator's where this
+                # SenecLocal (or SenecOnline) is referred as 'self._bridge_to_senec_...'
+                is_local = isinstance(the_unload_coordinator.senec, SenecLocal)
+                is_online  = isinstance(the_unload_coordinator.senec, SenecOnline)
+                if is_local or is_online:
+                    for a_other_coord in hass.data[DOMAIN].values():
+                        if isinstance(a_other_coord, SenecDataUpdateCoordinator):
+                            if is_local and isinstance(a_other_coord.senec, SenecOnline):
+                                if the_unload_coordinator._device_serial == a_other_coord._device_serial:
+                                    a_other_coord.senec.set_senec_local_instance(None)
+
+                            elif is_online and isinstance(a_other_coord.senec, SenecLocal):
+                                if the_unload_coordinator._device_serial == a_other_coord._device_serial:
+                                    a_other_coord.senec.set_senec_online_instance(None)
+
+            except BaseException as exception:
+                _LOGGER.warning(f"async_unload_entry() Exception (fatal): {exception}")
+
+            hass.data[DOMAIN].pop(config_entry.entry_id)
+
+        if CONF_TYPE in config_entry.data and config_entry.data[CONF_TYPE] == CONF_SYSTYPE_WEB:
+            hass.services.async_remove(DOMAIN, SERVICE_SET_PEAKSHAVING)  # Remove Service on unload
+
+    return unload_ok
+
+
+async def entry_update_listener(hass: HomeAssistant, config_entry: ConfigEntry) -> None:
+    global SKIP_NEXT_RELOAD_OF_WEB
+    _LOGGER.debug(f"entry_update_listener() called for entry: {config_entry.entry_id}")
+    if config_entry.data.get(CONF_TYPE, None) != CONF_SYSTYPE_WEB or SKIP_NEXT_RELOAD_OF_WEB is False:
+        await hass.config_entries.async_reload(config_entry.entry_id)
+    else:
+        _LOGGER.info(f"entry_update_listener() was called but the RELOAD will be skipped cause the updated was caused by an integrtaion-internal process - all is fine!")
+        SKIP_NEXT_RELOAD_OF_WEB = False
+
+
+async def async_remove_config_entry_device(hass: HomeAssistant, config_entry: ConfigEntry, device_entry: DeviceEntry) -> bool:
+    coordinator = hass.data[DOMAIN][config_entry.entry_id]
+    # Only handle devices belonging to this integration/config entry
+    if config_entry.entry_id not in device_entry.config_entries:
+        return False
+
+    if not any(identifier[0] == DOMAIN for identifier in device_entry.identifiers):
+        return False
+
+    # Currently we allow to DELETE ANYTHING - no further checks!
+    #main_device_id = slugify(f"did_{config_entry.data.get(CONF_HOST)}")
+    #if (DOMAIN, main_device_id) in device_entry.identifiers:
+    #    return False
+
+    # Allow removing dynamic child devices like vehicles/loadpoints.
+    return coordinator is not None
+
 
 # Map platforms to their corresponding search lists
 LOCAL_PLATFORM_MAPPING: Final = {
@@ -512,11 +567,11 @@ class SenecDataUpdateCoordinator(DataUpdateCoordinator):
 
                             # when we have ALL, we can break the loop
                             if (opt[QUERY_PEAK_SHAVING_KEY] and
-                                opt[QUERY_SPARE_CAPACITY_KEY] and
-                                opt[QUERY_TOTALS_KEY] and
-                                opt[QUERY_SYSTEM_DETAILS_KEY] and
-                                opt[QUERY_WALLBOX_KEY] and
-                                opt[QUERY_SGREADY_KEY]
+                                    opt[QUERY_SPARE_CAPACITY_KEY] and
+                                    opt[QUERY_TOTALS_KEY] and
+                                    opt[QUERY_SYSTEM_DETAILS_KEY] and
+                                    opt[QUERY_WALLBOX_KEY] and
+                                    opt[QUERY_SGREADY_KEY]
                             ):
                                 _LOGGER.debug(f"All required options are set: {opt} - can cancel the checking loop")
                                 break
@@ -650,6 +705,28 @@ class SenecDataUpdateCoordinator(DataUpdateCoordinator):
         _LOGGER.warning(str(evt))
         return True
 
+    async def check_and_set_senec_online_at_senec_local(self, hass: HomeAssistant):
+        _LOGGER.debug(f"check_and_set_senec_online_at_senec_local() called")
+        if not isinstance(self.senec, SenecOnline):
+            # this is only for SenecOnline Coordinators...
+            _LOGGER.warning(f"check_and_set_senec_online_at_senec_local(): called for a NON-SenecOnline instance")
+            return
+
+        # Search the (optional) sibling SenecLocal for this SenecOnline via serial-number and connect them
+        for a_other_coord in hass.data[DOMAIN].values():
+            if isinstance(a_other_coord, SenecDataUpdateCoordinator) and isinstance(a_other_coord.senec, SenecLocal):
+                # we must ensure that the 'a_other_coord' have already passed it's initialization-phase...
+                max_wait_count = 0
+                while max_wait_count < 20 and a_other_coord._device_serial is None:
+                    _LOGGER.debug(f"check_and_set_senec_online_at_senec_local(): waiting for a_other_coord._device_serial to be set [count: {max_wait_count}]")
+                    await asyncio.sleep(5)
+                    max_wait_count += 1
+
+                if self._device_serial == a_other_coord._device_serial:
+                    _LOGGER.info(f"check_and_set_senec_online_at_senec_local(): SIBLING: LOCAL Sibling found for this SenecOnline[{util.mask_string(self._device_serial)}]: {a_other_coord.senec}")
+                    self.senec.set_senec_local_instance(a_other_coord.senec)
+                    a_other_coord.senec.set_senec_online_instance(self.senec)
+
     async def check_for_post_migration_tasks(self, hass: HomeAssistant):
         _LOGGER.debug(f"check_for_post_migration_tasks() called")
         if CONF_MUST_START_POST_MIGRATION_PROCESS in self._config_entry.data:
@@ -748,52 +825,6 @@ class SenecDataUpdateCoordinator(DataUpdateCoordinator):
                 sensor._previous_float_value = None
             else:
                 _LOGGER.debug(f"No previous float value to reset for sensor: {sensor.entity_description.key}")
-
-
-async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry):
-    """Unload Senec config entry."""
-    _LOGGER.debug(f"async_unload_entry() called for entry: {config_entry.entry_id}")
-    unload_ok = await hass.config_entries.async_unload_platforms(config_entry, PLATFORMS)
-
-    if unload_ok:
-        if DOMAIN in hass.data and config_entry.entry_id in hass.data[DOMAIN]:
-            try:
-                the_unload_coordinator = hass.data[DOMAIN][config_entry.entry_id]
-
-                # we must find all other (still present) coordinator's where this
-                # SenecLocal (or SenecOnline) is referred as 'self._bridge_to_senec_...'
-                is_local = isinstance(the_unload_coordinator.senec, SenecLocal)
-                is_online  = isinstance(the_unload_coordinator.senec, SenecOnline)
-                if is_local or is_online:
-                    for a_other_coord in hass.data[DOMAIN].values():
-                        if isinstance(a_other_coord, SenecDataUpdateCoordinator):
-                            if is_local and isinstance(a_other_coord.senec, SenecOnline):
-                                if the_unload_coordinator._device_serial == a_other_coord._device_serial:
-                                    a_other_coord.senec.set_senec_local_instance(None)
-
-                            elif is_online and isinstance(a_other_coord.senec, SenecLocal):
-                                if the_unload_coordinator._device_serial == a_other_coord._device_serial:
-                                    a_other_coord.senec.set_senec_online_instance(None)
-
-            except BaseException as exception:
-                _LOGGER.warning(f"async_unload_entry() Exception (fatal): {exception}")
-
-            hass.data[DOMAIN].pop(config_entry.entry_id)
-
-        if CONF_TYPE in config_entry.data and config_entry.data[CONF_TYPE] == CONF_SYSTYPE_WEB:
-            hass.services.async_remove(DOMAIN, SERVICE_SET_PEAKSHAVING)  # Remove Service on unload
-
-    return unload_ok
-
-
-async def entry_update_listener(hass: HomeAssistant, config_entry: ConfigEntry) -> None:
-    global SKIP_NEXT_RELOAD_OF_WEB
-    _LOGGER.debug(f"entry_update_listener() called for entry: {config_entry.entry_id}")
-    if config_entry.data.get(CONF_TYPE, None) != CONF_SYSTYPE_WEB or SKIP_NEXT_RELOAD_OF_WEB is False:
-        await hass.config_entries.async_reload(config_entry.entry_id)
-    else:
-        _LOGGER.info(f"entry_update_listener() was called but the RELOAD will be skipped cause the updated was caused by an integrtaion-internal process - all is fine!")
-        SKIP_NEXT_RELOAD_OF_WEB = False
 
 class SenecEntity(CustomFriendlyNameEntity):
     """Defines a base Senec entity."""

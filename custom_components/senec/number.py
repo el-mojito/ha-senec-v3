@@ -61,7 +61,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry,
                         except Exception as err:
                             _LOGGER.warning(f"WEB: Could not fetch min/max values for '{description.key}' - cause: {err}")
 
-            entity = SenecNumber(coordinator, description, False)
+            entity = SenecNumber(coordinator, description)
             entities.append(entity)
 
     elif CONF_TYPE in config_entry.data and config_entry.data[CONF_TYPE] == CONF_SYSTYPE_SENECCONNECT:
@@ -69,8 +69,34 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry,
 
     else:
         for description in MAIN_NUMBER_TYPES:
-            entity = SenecNumber(coordinator, description, True)
+            must_add_to_patch_max_value_later = False
+            if description.array_key == "wallbox_set_icmax":
+                if coordinator.senec._bridge_to_senec_online is None:
+                    # we somehow must do this later...
+                    must_add_to_patch_max_value_later = True
+                else:
+                    # we already have the SenecOnline running... so we can get from
+                    # the SenecLocal implementation, the extremas of the wallbox...
+                    min_max = getattr(coordinator.senec, f"{description.key}_extrema")
+                    if min_max is not None:
+                        _LOGGER.debug(f"NUMBER async_setup_entry(): LOCAL: Going to adjust min/max values for '{description.key}' with min: {min_max[0]} and max: {min_max[1]}")
+                        description = replace(
+                            description,
+                            native_min_value=round(float(min_max[0]), 1),
+                            native_max_value=round(float(min_max[1]), 1)
+                        )
+                    else:
+                        _LOGGER.debug(f"NUMBER async_setup_entry(): LOCAL: No min/max values found for '{description.key}'")
+
+            entity = SenecNumber(coordinator, description)
             entities.append(entity)
+
+            # we must adjust min-max later (once we set _bridge_to_senec_online)...
+            if must_add_to_patch_max_value_later:
+                coordinator.senec._number_entities_to_patch_later.append({
+                    "method": f"{description.key}_extrema",
+                    "entity": entity}
+                )
 
     async_add_entities(entities)
 
@@ -79,12 +105,10 @@ class SenecNumber(SenecEntity, NumberEntity):
     def __init__(
             self,
             coordinator: SenecDataUpdateCoordinator,
-            description: NumberEntityDescription,
-            adjust_min_max: bool = False
+            description: NumberEntityDescription
     ):
         """Initialize"""
         super().__init__(coordinator=coordinator, description=description)
-        self._adjust_min_max = adjust_min_max
 
         if (hasattr(self.entity_description, 'entity_registry_enabled_default')):
             self._attr_entity_registry_enabled_default = self.entity_description.entity_registry_enabled_default
@@ -101,27 +125,6 @@ class SenecNumber(SenecEntity, NumberEntity):
     async def async_added_to_hass(self) -> None:
         """Handle entity which will be added."""
         await super().async_added_to_hass()
-
-        # we want to adjust the MIN value for the ic_max selectors...
-        if self._adjust_min_max and self.entity_description.key.endswith("set_icmax"):
-            try:
-                # waiting for WEBapi Integration to become available...
-                counter = 1
-                while counter < 6 and self.coordinator.senec._bridge_to_senec_online is None:
-                    _LOGGER.debug(f"LOCAL: Waiting {(counter * 5)} sec for WEBapi Integration to become available - counter: {counter}")
-                    await asyncio.sleep(counter * 5)
-                    counter += 1
-
-                _LOGGER.debug(f"LOCAL: Try to adjust min/max values for '{self.entity_description.key}'")
-                min_max = getattr(self.coordinator.senec, self.entity_description.key + "_extrema")
-                if min_max is not None:
-                    self.entity_description = replace(
-                        self.entity_description,
-                        native_min_value=round(float(min_max[0]), 1),
-                        native_max_value=round(float(min_max[1]), 1)
-                    )
-            except Exception as err:
-                _LOGGER.warning(f"LOCAL: Could not fetch min/max values for '{self.entity_description.key}' - cause: {err}")
 
     @property
     def native_value(self) -> float:
