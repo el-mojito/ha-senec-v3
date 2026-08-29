@@ -284,17 +284,18 @@ class SenecLocal:
             # min/max values...
             try:
                 for a_obj in self._number_entities_to_patch_later:
-                    the_entrity = a_obj["entity"]
-                    min_max = getattr(self, a_obj["method"])
-                    if min_max is not None:
-                        _LOGGER.debug(f"set_senec_online_instance(): LOCAL: Going to adjust min/max values for '{the_entrity.entity_.key}' with min: {min_max[0]} and max: {min_max[1]}")
-                        the_entrity.entity_description = replace(
-                            the_entrity.entity_description,
-                            native_min_value=round(float(min_max[0]), 1),
-                            native_max_value=round(float(min_max[1]), 1)
+                    the_number_entity_to_adjust = a_obj["entity"]
+                    the_method_to_call = a_obj["method"]
+                    min_max_range = getattr(self, the_method_to_call)
+                    if min_max_range is not None and len(min_max_range) > 1:
+                        _LOGGER.debug(f"set_senec_online_instance(): LOCAL: Going to adjust min/max values for '{the_number_entity_to_adjust.key}' with min: {min_max_range[0]} and max: {min_max_range[1]}")
+                        the_number_entity_to_adjust.entity_description = replace(
+                            the_number_entity_to_adjust.entity_description,
+                            native_min_value=round(float(min_max_range[0]), 1),
+                            native_max_value=round(float(min_max_range[1]), 1)
                         )
                     else:
-                        _LOGGER.debug(f"set_senec_online_instance(): LOCAL: No min/max values found for '{the_entrity.entity_description.key}'")
+                        _LOGGER.debug(f"set_senec_online_instance(): LOCAL: No min/max values found for '{the_number_entity_to_adjust.key}' - tried to called '{the_method_to_call}', did method exist? {hasattr(self, the_method_to_call)} - DEBUG self: {self}")
             except BaseException as exc:
                 _LOGGER.debug(f"set_senec_online_instance(): LOCAL: Error while adjusting min/max values: {type(exc).__name__} - {exc}")
         else:
