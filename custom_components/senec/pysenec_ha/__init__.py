@@ -288,14 +288,23 @@ class SenecLocal:
                     the_method_to_call = a_obj["method"]
                     min_max_range = getattr(self, the_method_to_call)
                     if min_max_range is not None and len(min_max_range) > 1:
-                        _LOGGER.debug(f"set_senec_online_instance(): LOCAL: Going to adjust min/max values for '{the_number_entity_to_adjust.key}' with min: {min_max_range[0]} and max: {min_max_range[1]}")
+                        _LOGGER.debug(f"set_senec_online_instance(): LOCAL: Going to adjust min/max values for '{the_number_entity_to_adjust.entity_description.key}' with min: {min_max_range[0]} and max: {min_max_range[1]}")
+                        the_min_val = round(float(min_max_range[0]), 1)
+                        the_max_val = round(float(min_max_range[1]), 1)
+
+                        try:
+                            the_number_entity_to_adjust._attr_native_min_value = the_min_val
+                            the_number_entity_to_adjust._attr_native_max_value = the_max_val
+                        except:
+                            pass
+
                         the_number_entity_to_adjust.entity_description = replace(
                             the_number_entity_to_adjust.entity_description,
-                            native_min_value=round(float(min_max_range[0]), 1),
-                            native_max_value=round(float(min_max_range[1]), 1)
+                            native_min_value=the_min_val,
+                            native_max_value=the_max_val
                         )
                     else:
-                        _LOGGER.debug(f"set_senec_online_instance(): LOCAL: No min/max values found for '{the_number_entity_to_adjust.key}' - tried to called '{the_method_to_call}', did method exist? {hasattr(self, the_method_to_call)} - DEBUG self: {self}")
+                        _LOGGER.debug(f"set_senec_online_instance(): LOCAL: No min/max values found for '{the_number_entity_to_adjust.entity_description.key}' - tried to called '{the_method_to_call}', did method exist? {hasattr(self, the_method_to_call)} - DEBUG self: {self}")
             except BaseException as exc:
                 _LOGGER.debug(f"set_senec_online_instance(): LOCAL: Error while adjusting min/max values: {type(exc).__name__} - {exc}")
         else:
